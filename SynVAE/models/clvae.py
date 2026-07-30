@@ -27,7 +27,11 @@ class CLVAE(nn.Module):
         self.dec_input_dim =  self.latent_dim
 
         if hidden_dims is None:
-            hidden_dims = [2000, 500, 250, 50]
+            hidden_dims = [500, 250, 50]
+
+        if hidden_dims is not None:
+            if not isinstance(hidden_dims, list) or not all(isinstance(h, int) for h in hidden_dims):
+                raise TypeError("hidden_dims must be a list of int")
 
         self.hidden_dims = hidden_dims
 
@@ -46,7 +50,38 @@ class CLVAE(nn.Module):
 
         self.fn_mu, self.fn_logvar = self.build_latent(self.hidden_dims)
 
-        self.decoder = self.build_decoder(self.n_genes, self.dec_input_dim, self.hidden_dims)
+        self.decoder = self.build_decoder(self.dec_input_dim, self.hidden_dims)
+
+        # self.encoder = nn.Sequential(
+        #     nn.Linear(self.enc_input_dim, 128),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.2),
+
+        #     nn.Linear(128, 64),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.2),
+
+        #     nn.Linear(64, 32),
+        # )
+
+        # self.fn_mu = nn.Linear(32, latent_dim)
+        # self.fn_logvar = nn.Linear(32, latent_dim)
+
+        # self.decoder = nn.Sequential(
+        #     nn.Linear(self.dec_input_dim, 32),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.2),
+
+        #     nn.Linear(32, 64),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.2),
+
+        #     nn.Linear(64, 128),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.2),
+
+        #     nn.Linear(128, self.n_genes),
+        # )
 
     def build_encoder(self, encoder_input_dim, hidden_dims):
         layers = []
@@ -61,8 +96,8 @@ class CLVAE(nn.Module):
             prev_dim = dim
 
         return nn.Sequential(*layers)
-       
-    def build_decoder(self, n_genes, decoder_input_dim, hidden_dims):
+     
+    def build_decoder(self, decoder_input_dim, hidden_dims):
         layers = []
 
         prev = decoder_input_dim
@@ -74,7 +109,7 @@ class CLVAE(nn.Module):
 
             prev = h
 
-        layers.append(nn.Linear(prev, n_genes))
+        layers.append(nn.Linear(prev, self.n_genes))
 
         return nn.Sequential(*layers)
     
@@ -100,7 +135,7 @@ class CLVAE(nn.Module):
         embeds = embedding_layer(labels)
         return torch.cat((x, embeds), dim=-1)
     
-    def encode(self, x, cell_ids = None):
+    def encode(self, x, cell_ids=None):
 
         if self.num_cell_classes is not None and cell_ids is not None:
             x = self.concat_embedding(x, cell_ids, self.cell_embedding)
@@ -141,8 +176,8 @@ class CLVAE(nn.Module):
     
         return z, mu_x, theta
     
-    def forward(self, x, exp_ids=None, cell_ids=None):
-        z, mu_z, logvar = self.encode(x, cell_ids)
+    def forward(self, x, exp_ids=None, cell_ids=None, enc_log1p=False):
+        x_log1p = torch.log1p(x) if enc_log1p else x
+        z, mu_z, logvar = self.encode(x_log1p, cell_ids)
         z, mu_x, theta = self.decode(x, z, exp_ids, cell_ids)
         return z, mu_z, logvar, mu_x, theta
-    

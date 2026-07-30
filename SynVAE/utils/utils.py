@@ -2,6 +2,7 @@ import torch
 from torch.nn import functional as F
 from tqdm import tqdm
 import scanpy as sc
+from SynVAE.losses.vaeloss import get_kl_weight
 
 def preprocessing(data):
 
@@ -26,9 +27,8 @@ def sc_collate_fn(batch):
 
     return x, cell_ids, exp_ids
 
-def convert_onnx(model):
+def convert_onnx(model, input_tensor):
     model.eval()
-    input_tensor = torch.rand((250, 40899))
 
     torch.onnx.export(model,
                       input_tensor,
@@ -43,7 +43,7 @@ def convert_onnx(model):
     print(" ")
     print('Model has been converted to ONNX')
 
-def train_model(model, dataloader, optimizer, epochs, vae_loss_fn):
+def train_model(model, dataloader, optimizer, epochs, vae_loss_fn, kl_weight, enc_log1p, kl_annealing=False, early_stopping=True, min_delta = 1e-4, patience = 10):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -54,19 +54,18 @@ def train_model(model, dataloader, optimizer, epochs, vae_loss_fn):
     rec_losses = []
     kl_losses = []
 
-    running_loss = 0.0
-    running_rec_loss = 0.0
-    running_kl_loss = 0.0
-
     best_loss =  float("inf")
-    min_delta = 1e-4
-    patience = 5
+    best_state = None
 
     pbar = tqdm(total=epochs)
 
     log_library = []
 
     for epoch in range(epochs):
+        running_loss = 0.0
+        running_rec_loss = 0.0
+        running_kl_loss = 0.0
+        n_batches = 0
 
         for batch, cell_id, exp_id in dataloader:
             log_library.append(torch.log(batch.sum(dim=1)))
@@ -80,9 +79,14 @@ def train_model(model, dataloader, optimizer, epochs, vae_loss_fn):
                 exp_id = exp_id.to(device)
 
 
-            z, mu_z, logvar, mu_x, theta = model(batch, exp_id, cell_id)
+            z, mu_z, logvar, mu_x, theta = model(batch, exp_id, cell_id, enc_log1p)
 
-            loss, rec_loss, kl_loss = vae_loss_fn(batch, mu_z, mu_x, theta, logvar)
+            if kl_annealing:
+                kl_weight = get_kl_weight(epoch)
+            else:
+                kl_weight = kl_weight
+
+            loss, rec_loss, kl_loss = vae_loss_fn(batch, mu_z, mu_x, theta, logvar, kl_weight, 1, 1e-6)
 
             if not torch.isfinite(loss):
                 print(f"Loss became invalid at epoch {epoch}")
@@ -95,34 +99,33 @@ def train_model(model, dataloader, optimizer, epochs, vae_loss_fn):
             running_loss += loss.item()
             running_rec_loss += rec_loss.item()
             running_kl_loss += kl_loss.item()
+            n_batches += 1
 
-            size = batch.size(0)
+        losses.append(running_loss / n_batches)
+        rec_losses.append(running_rec_loss / n_batches)
+        kl_losses.append(running_kl_loss / n_batches)
 
-        losses.append(running_loss / size)
-        rec_losses.append(running_rec_loss / size)
-        kl_losses.append(running_kl_loss / size)
+        if early_stopping:
+            if losses[-1] < best_loss - min_delta:
+                best_loss = losses[-1]
+                patience_counter = 0
 
-        if losses[-1] < best_loss - min_delta:
-            best_loss = losses[-1]
-            patience_counter = 0
+                best_state = {
+                    k: v.cpu().clone()
+                    for k, v in model.state_dict().items()
+                }
 
-            best_state = {
-                k: v.cpu().clone()
-                for k, v in model.state_dict().items()
-            }
-
-        else:
-            patience_counter += 1
-
-        if patience_counter >= patience:
-            print(f"Early stopping at epoch {epoch + 1}")
-            break
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch + 1}")
+                    break
 
         pbar.update(1)
 
     pbar.close()
 
-    if best_state is not None:
+    if best_state is not None and early_stopping:
         model.load_state_dict(best_state)
     
     log_lib = torch.cat(log_library)
@@ -156,11 +159,11 @@ def generate_synthetic_cells(model, n_cells, lib_mu, lib_std, cell_ids = None, e
 
         library = torch.exp(torch.randn(n_cells, 1, device=z.device) * lib_std + lib_mu)
 
-        print(f"Library: {library[:10]}")
+        # print(f"Library: {library[:10]}")
 
-        print(f"lib_mu: {lib_mu}")
+        # print(f"lib_mu: {lib_mu}")
 
-        print(f"lib_std: {lib_std}")
+        # print(f"lib_std: {lib_std}")
 
 
         mu = torch.clamp(library * torch.softmax(model.decoder(z), dim=-1), min=1e-8)

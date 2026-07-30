@@ -5,36 +5,69 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from torch.optim import Adam
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+from torch.optim import Adam
+from torch.utils.data import WeightedRandomSampler
+
+
 from SynVAE.models.clvae import CLVAE
 from SynVAE.losses.vaeloss import VAELoss
 from SynVAE.datasets.scd import SingleCellDataset
 from SynVAE.utils.utils import train_model, generate_synthetic_cells, sc_collate_fn, preprocessing
-from SynVAE.visualize.visualize import visualization_preprocessing, visualize_umap, visualize_tsne, overlapping_visualization, visualize_heatmap
-
+from SynVAE.visualize.visualize import visualization_preprocessing, visualize_umap, visualize_tsne, overlapping_visualization, plot_latent_space_umap
 
 
 class SynVae:
 
-    def __init__(self, adata, latent_dim=30, hidden_dims=None, cell_embed_dim:int = None, trials_embed_dim: int = None, has_cell_labels:bool = False, has_trials_labels:bool = False, cells_key:str = None, trials_key:str = None):
+    def __init__(self, adata, n_genes=None, latent_dim=30, hidden_dims=None, cell_embed_dim:int = None, trials_embed_dim: int = None, has_cell_labels:bool = False, has_trials_labels:bool = False, cells_key:str = None, trials_key:str = None, num_cell_classes=None, num_trials_labels=None):
 
-        self.dataset = SingleCellDataset(adata, has_cell_labels, has_trials_labels, cells_key, trials_key)
-        self.model = CLVAE(adata.n_vars, latent_dim, hidden_dims, self.dataset.len_trials_ids, trials_embed_dim, self.dataset.len_cell_ids, cell_embed_dim)
-        self.data = adata
+        if adata is not None:
+            self.has_cell_labels = has_cell_labels
+            self.has_trials_labels = has_trials_labels
+            self.dataset = SingleCellDataset(adata, has_cell_labels, has_trials_labels, cells_key, trials_key)
+            self.num_trials_labels = self.dataset.len_trials_ids
+            self.num_cell_classes = self.dataset.len_cell_ids
+            self.cell_labels_to_id, self.trials_labels_to_id = self.dataset.get_label_to_id_dicts()
+            self.cell_label_proportions, self.trials_label_proportions = self._compute_empirical_proportions()
+            self.var_names = adata.var_names.copy()
+            self.obs_names = adata.obs_names.copy()
+            self.data = adata
+        else:
+            self.has_cell_labels = has_cell_labels
+            self.has_trials_labels = has_trials_labels
+            self.dataset = None
+            self.num_trials_labels = num_trials_labels
+            self.num_cell_classes = num_cell_classes
+            self.cell_labels_to_id, self.trials_labels_to_id = (None, None)
+            self.cell_label_proportions, self.trials_label_proportions = (None, None)
+            self.var_names, self.obs_names = (None, None)
+            self.dataset_len = None 
+            self.data = None         
 
-        self.has_cell_labels = has_cell_labels
-        self.has_trials_labels = has_trials_labels
+        if adata is not None:
+            n_genes = adata.n_vars
+        elif n_genes is None:
+            raise ValueError("adata and n_genes cannot both be None")
+
+        self.model = CLVAE(n_genes, latent_dim, hidden_dims, self.num_trials_labels, trials_embed_dim, self.num_cell_classes, cell_embed_dim)
+
+
         self.cells_key = cells_key
         self.trials_key = trials_key
+        self.hidden_dims = hidden_dims
 
-        self.num_trials_labels = self.dataset.len_trials_ids
-        self.cell_num_classes = self.dataset.len_cell_ids
-        self.cell_labels_to_id, self.trials_labels_to_id = self.dataset.get_label_to_id_dicts()
+        self.cell_id_to_labels = None
+        self.trials_id_to_labels = None
 
         if self.cell_labels_to_id is not None:
             self.cell_id_to_labels = {label_id: label for label, label_id in self.cell_labels_to_id.items()} 
             
         if self.trials_labels_to_id is not None:
-            self.exp_id_to_labels = {label_id: label for label, label_id in self.trials_labels_to_id.items()}
+            self.trials_id_to_labels = {label_id: label for label, label_id in self.trials_labels_to_id.items()}
 
         self.collate_fn = sc_collate_fn
         self.loss_fn = VAELoss
@@ -45,16 +78,64 @@ class SynVae:
         self.visualize_umap_fn = visualize_umap
         self.visualize_tsne_fn = visualize_tsne
         self.visualize_overlap_fn = overlapping_visualization
-        self.visualize_heatmap_fn = visualize_heatmap
-
-        self.var_names = adata.var_names.copy()
-        self.obs_names = adata.obs_names.copy()
-
+        self.visualize_latent_space_umap_fn = plot_latent_space_umap
 
         self.syn_data = None
         self.sc_library_mu = None
         self.sc_library_std = None
         self.model_loss_history = None
+    
+    def save(self, filepath: str):
+        checkpoint = {
+        "config": {
+            "n_genes": self.model.n_genes,
+            "latent_dim": self.model.latent_dim,
+            "num_trials_labels": self.num_trials_labels,
+            "trials_embed_dim": self.model.trials_embed_dim,
+            "num_cell_classes": self.num_cell_classes,
+            "cell_embed_dim": self.model.cell_embed_dim,
+            "hidden_dims": self.hidden_dims,
+            "has_cell_labels": self.has_cell_labels,
+            "has_trials_labels": self.has_trials_labels,
+            "cells_key": self.cells_key,
+            "trials_key": self.trials_key,
+        },
+
+        "state_dict": self.model.state_dict(),
+
+        "library_mu": self.sc_library_mu,
+        "library_std": self.sc_library_std,
+
+        "var_names": None if self.var_names is None else list(self.var_names),
+        "obs_names": None if self.obs_names is None else list(self.obs_names),
+
+        "cell_labels_to_id": self.cell_labels_to_id,
+        "cell_id_to_labels": self.cell_id_to_labels,
+
+        "trials_labels_to_id": self.trials_labels_to_id,
+        "trials_id_to_labels": self.trials_id_to_labels,
+        "cell_label_proportions": self.cell_label_proportions,
+        "trials_label_proportions": self.trials_label_proportions,
+        }
+
+        torch.save(checkpoint, filepath)
+
+    def saveOnnx(self, input_shape, filepath: str = "SynVAE_Model.onnx"):
+        self.model.eval()
+        input_tensor = torch.rand(input_shape)
+
+        torch.onnx.export(self.model,
+                      input_tensor,
+                      filepath,
+                      export_params=True,
+                      opset_version=10,
+                      do_constant_folding=False,
+                      input_names=['modelInput'],
+                      output_names=['modelOutput'],
+                      dynamic_axes={'modelInput' :{0 : 'batch_size'}, 'modelOutput' : {0 : 'batch_size'}})
+
+        print(" ")
+        print('Model has been converted to ONNX')
 
     @classmethod
     def load(cls, filepath, map_location="cpu"):
@@ -65,16 +146,26 @@ class SynVae:
 
         model = cls(
             adata=None,
+            n_genes = config["n_genes"],
 
-            n_genes=config["n_genes"],
-            latent_dim=config["latent_dim"],
+            latent_dim = config["latent_dim"],
+            hidden_dims = config["hidden_dims"],
 
+            trials_embed_dim = config["trials_embed_dim"],
+            cell_embed_dim = config["cell_embed_dim"],
+            
+            num_cell_classes=config["num_cell_classes"], 
             num_trials_labels=config["num_trials_labels"],
-            trials_embed_dim=config["trials_embed_dim"],
-
-            cell_num_classes=config["cell_num_classes"],
-            cell_embed_dim=config["cell_embed_dim"],
         )
+        
+        model.num_cell_classes = config["num_cell_classes"]
+        model.num_trials_labels = config["num_trials_labels"]
+
+        model.has_cell_labels = config["has_cell_labels"]
+        model.has_trials_labels = config["has_trials_labels"]
+        model.cells_key = config["cells_key"]
+        model.trials_key = config["trials_key"]
+        
 
         model.model.load_state_dict(checkpoint["state_dict"])
 
@@ -82,6 +173,7 @@ class SynVae:
         model.sc_library_std = checkpoint["library_std"]
 
         model.var_names = checkpoint["var_names"]
+        model.obs_names = checkpoint["obs_names"]
 
         model.cell_labels_to_id = checkpoint["cell_labels_to_id"]
         model.cell_id_to_labels = checkpoint["cell_id_to_labels"]
@@ -89,34 +181,9 @@ class SynVae:
         model.trials_labels_to_id = checkpoint["trials_labels_to_id"]
         model.trials_id_to_labels = checkpoint["trials_id_to_labels"]
 
+        model.cell_label_proportions = checkpoint["cell_label_proportions"]
+        model.trials_label_proportions = checkpoint["trials_label_proportions"]
         return model
-
-    def save(self, filepath: str):
-        checkpoint = {
-        "config": {
-            "n_genes": self.model.n_genes,
-            "latent_dim": self.model.latent_dim,
-            "num_trials_labels": self.model.num_trials_labels,
-            "trials_embed_dim": self.model.trials_embed_dim,
-            "num_cell_classes": self.model.num_cell_classes,
-            "cell_embed_dim": self.model.cell_embed_dim,
-        },
-
-        "state_dict": self.model.state_dict(),
-
-        "library_mu": self.sc_library_mu,
-        "library_std": self.sc_library_std,
-
-        "var_names": list(self.var_names),
-
-        # "cell_labels_to_id": self.cell_labels_to_id,
-        # "cell_id_to_labels": self.cell_id_to_labels,
-
-       # "trials_labels_to_id": self.trials_labels_to_id,
-       # "trials_id_to_labels": self.trials_id_to_labels,
-        }
-
-        torch.save(checkpoint, filepath)
 
     def get_model(self):
         return self.model
@@ -160,9 +227,56 @@ class SynVae:
         self.dataset = SingleCellDataset(data, self.has_cell_labels, self.has_trials_labels, self.cells_key, self.trials_key)
         return self
 
-    def fit(self, batch_size=250, optimizer=None, epochs=250, lr=1e-3, vae_loss_fn=None):
+    def _compute_empirical_proportions(self):
+        if self.has_cell_labels:
+            labels, counts = np.unique(self.dataset.cell_labels, return_counts=True)
+            self.cell_label_proportions = dict(zip(labels, counts / counts.sum()))
+        else:
+            self.cell_label_proportions = None
 
-        dataloader = DataLoader(self.dataset, batch_size=batch_size, shuffle=True, collate_fn=self.collate_fn)
+        if self.has_trials_labels:
+            labels, counts = np.unique(self.dataset.trials_labels, return_counts=True)
+            self.trials_label_proportions = dict(zip(labels, counts / counts.sum()))
+        else:
+            self.trials_label_proportions = None
+        
+        return self.cell_label_proportions, self.trials_label_proportions
+
+    def _sample_empirical_labels(self, n_cells, label_type: str):
+        if label_type == "cell":
+            proportions = self.cell_label_proportions
+        elif label_type == "trials":
+            proportions = self.trials_label_proportions
+        else:
+            raise ValueError("label_type must be 'cell' or 'trials'")
+
+        if proportions is None:
+            return None
+
+        labels = np.array(list(proportions.keys()))
+        probs = np.array(list(proportions.values()))
+
+        sampled = np.random.choice(labels, size=n_cells, p=probs)
+        return sampled.tolist()
+
+    def fit(self, batch_size=250, optimizer=None, epochs=250, lr=1e-3, vae_loss_fn=None, enc_log1p=False, use_sampler=False, num_workers=8, kl_weight=0.5, kl_annealing=False, early_stopping=True, min_delta = 1e-4, patience = 10):
+        
+        if self.dataset is None:
+            raise RuntimeError("No dataset attached. Call preprocess(data) before fit().")
+
+        if use_sampler:
+            if not self.has_cell_labels:
+                raise ValueError("use_sampler=True requires cell labels (cells_key must have been provided).")
+
+            cell_ids_array = np.array([self.dataset.cell_labels_to_id[label] for label in self.dataset.cell_labels])
+            class_counts = np.bincount(cell_ids_array)
+            weights = 1.0 / class_counts[cell_ids_array]
+            sampler = WeightedRandomSampler(weights, num_samples=len(self.dataset), replacement=True)
+
+            dataloader = DataLoader(self.dataset, batch_size=batch_size, sampler=sampler, collate_fn=self.collate_fn, num_workers=num_workers)
+        else:
+            dataloader = DataLoader(self.dataset, batch_size=batch_size, shuffle=True, collate_fn=self.collate_fn, num_workers=num_workers)
+
 
         if optimizer is None:
             optimizer = Adam(self.model.parameters(), lr=lr)
@@ -170,22 +284,28 @@ class SynVae:
         if vae_loss_fn is None:
             vae_loss_fn = self.loss_fn
 
-        losses, rec_losses, kl_losses, lib_mu, lib_std = self.train_fn(self.model, dataloader, optimizer, epochs, vae_loss_fn)
+        losses, rec_losses, kl_losses, lib_mu, lib_std = self.train_fn(self.model, dataloader, optimizer, epochs, vae_loss_fn, kl_weight, enc_log1p, kl_annealing, early_stopping, min_delta, patience)
 
         self.sc_library_mu = lib_mu
         self.sc_library_std = lib_std
-
+        
         self.model_loss_history = {"overall_loss": losses, "rec_loss": rec_losses, "kl_loss": kl_losses}
 
         return self
 
-    def sample(self, n_cells, cell_labels=None, trials_labels=None, return_as_anndata=True):
+    def sample(self, n_cells, cell_labels=None, trials_labels=None, match_dataset_proportions=False, return_as_anndata=True):
 
         if self.sc_library_mu is None or self.sc_library_std is None:
                 raise RuntimeError("Model must be trained before generating cells.")
         
         if n_cells <= 0:
             raise ValueError("n_cells must be positive")
+        
+        if cell_labels is None and match_dataset_proportions:
+            cell_labels = self._sample_empirical_labels(n_cells, "cell")
+
+        if trials_labels is None and match_dataset_proportions:
+            trials_labels = self._sample_empirical_labels(n_cells, "trials")
         
         def _process_labels(labels, label_type:str):
             ids = None
@@ -255,6 +375,9 @@ class SynVae:
         cell_ids, cell_labels = _process_labels(cell_labels, "cell")
         exp_ids, trials_labels = _process_labels(trials_labels, "trials")
 
+        if self.model.avg_cell_embedding is None or self.model.avg_exp_embedding is None:
+            self.model.compute_avg_embedding()
+
         counts = self.gen_data_fn(self.model, n_cells, self.sc_library_mu, self.sc_library_std, cell_ids, exp_ids).detach().cpu().numpy()
 
         if return_as_anndata:
@@ -301,23 +424,26 @@ class SynVae:
         ax[0].set_xlabel("Epoch")
         ax[0].set_ylabel("Loss")
         ax[0].set_title("Training Loss")
-        ax[0].set_xticks(epochs if len(loss) <= 20 else None)
+        if len(loss) <= 20:
+            ax[0].set_xticks(epochs)
         ax[0].grid(True, linestyle="--", alpha=0.6)
         ax[0].legend()
 
-        ax[1].plot(epochs, loss, marker='o', linewidth=2, markersize=4, label="Loss")
+        ax[1].plot(epochs, rec_loss, marker='o', linewidth=2, markersize=4, label="Loss")
         ax[1].set_xlabel("Epoch")
         ax[1].set_ylabel("Loss")
         ax[1].set_title("Reconstruction Loss")
-        ax[1].set_xticks(epochs if len(rec_loss) <= 20 else None)
+        if len(rec_loss) <= 20:
+            ax[1].set_xticks(epochs)
         ax[1].grid(True, linestyle="--", alpha=0.6)
         ax[1].legend()
 
-        ax[2].plot(epochs, loss, marker='o', linewidth=2, markersize=4, label="Loss")
+        ax[2].plot(epochs, kl_loss, marker='o', linewidth=2, markersize=4, label="Loss")
         ax[2].set_xlabel("Epoch")
         ax[2].set_ylabel("Loss")
         ax[2].set_title("KL Loss")
-        ax[2].set_xticks(epochs if len(kl_loss) <= 20 else None)
+        if len(kl_loss) <= 20:
+            ax[2].set_xticks(epochs)
         ax[2].grid(True, linestyle="--", alpha=0.6)
         ax[2].legend()
         
@@ -353,28 +479,26 @@ class SynVae:
             fig, ax =  self.visualize_tsne_fn(data, color, title, xlabel, ylabel, save_name)
             plt.show()
 
-    def heatmap(self, color='leiden', save_name=None, title='Heatmap Visualization', xlabel='Heatmap Coordinate 1', ylabel='Heatmap Coordinate 2', preprocess_fn=None):
-        if self.syn_data is None:
-            raise RuntimeError("Model must be sampled before visualizing data.")
-        
-        if preprocess_fn is None:
-            fig, ax = self.visualize_heatmap_fn(data, color, title, xlabel, ylabel, save_name)
-            plt.show()
-
-        else:
-            data = preprocess_fn(self.syn_data.copy())
-            fig, ax = self.visualize_heatmap_fn(data, color, title, xlabel, ylabel, save_name)
-            plt.show()
-
     def overlapVisualization(self, adata, type="umap", color='leiden', title='Overlap Visualization', xlabel='Overlap Coordinate 1', ylabel='Overlap Coordinate 2', save_name=None, preprocess_fn=None):
         if self.syn_data is None:
             raise RuntimeError("Model must be sampled before visualizing data.")
         
         if preprocess_fn is None:
-            fig, ax =  self.visualize_overlap_fn(adata, self.syn_data, type, self.visualize_umap_fn, self.visualize_tsne_fn, color, title, xlabel, ylabel, save_name)
+            fig, ax =  self.visualize_overlap_fn(adata, self.syn_data, type, self.visualization_preprocess_fn, self.visualize_umap_fn, self.visualize_tsne_fn, color, title, xlabel, ylabel, save_name)
             plt.show()
         else:
-            adata = preprocess_fn(adata)
-            syn_data = preprocess_fn(self.syn_data.copy())
-            fig, ax =  self.visualize_overlap_fn(adata, syn_data, type, self.visualize_umap_fn, self.visualize_tsne_fn, color, title, xlabel, ylabel, save_name)
+            # adata = preprocess_fn(adata)
+            # syn_data = preprocess_fn(self.syn_data.copy())
+            fig, ax =  self.visualize_overlap_fn(adata, self.syn_data, type, preprocess_fn, self.visualize_umap_fn, self.visualize_tsne_fn, color, title, xlabel, ylabel, save_name)
             plt.show()
+
+    def plotlatent(self, dataloader, label_names=None, n_samples=50000, enc_log1p=False):
+     
+        if dataloader is None:
+            raise ValueError("DataLoader can not be None")
+        elif n_samples <= 0:
+            raise ValueError("n_samples must be greater than 0")
+        
+        fig, ax, latent, labels = self.visualize_latent_space_umap_fn(self.model, dataloader, label_names, n_samples, enc_log1p)
+        plt.show()
+        

@@ -3,7 +3,6 @@ from torch.utils.data import Dataset
 import numpy as np
 import scipy
 
-
 class SingleCellDataset(Dataset):
 
     def __init__(self, adata, has_cell_labels:bool = False, has_trials_labels:bool = False, cells_key:str = None, trials_key:str = None):
