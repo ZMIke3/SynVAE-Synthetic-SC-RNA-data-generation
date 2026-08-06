@@ -36,7 +36,7 @@ def plot_latent_heatmap(z_means, labels, label_names=None):
     plt.tight_layout()
     plt.show()
 
-def plot_latent_space_umap(model, dataloader, label_names=None, n_samples=20000, enc_log1p=False):
+def plot_latent_space_umap(model, dataloader, label_names=None, n_samples=20000, enc_log1p=True, n3d_umap=False):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -81,11 +81,9 @@ def plot_latent_space_umap(model, dataloader, label_names=None, n_samples=20000,
     embedding = reducer.fit_transform(latent)
 
     fig, ax = plt.subplots(figsize=(12, 10))
-    ax = fig.add_subplot(projection="3d")
 
     if labels is None:
-        ax.scatter(embedding[:, 0], embedding[:, 1], embedding[:, 2], s=6, alpha=0.7, color="tab:blue")
-        #ax.scatter(embedding[:, 0], embedding[:, 1], embedding[:, 1], s=6, alpha=0.7, color="tab:blue")
+        ax.scatter(embedding[:, 0], embedding[:, 1], s=6, alpha=0.7, color="tab:blue")
     else:
         unique_labels = np.unique(labels)
 
