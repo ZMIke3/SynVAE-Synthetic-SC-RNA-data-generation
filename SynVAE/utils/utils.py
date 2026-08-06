@@ -139,6 +139,11 @@ def generate_synthetic_cells(model, n_cells, lib_mu, lib_std, cell_ids = None, e
     device = next(model.parameters()).device
     model.eval()
 
+    if cell_id is not None:
+        cell_id = cell_id.to(device)
+    if exp_id is not None:
+        exp_id = exp_id.to(device)
+
     with torch.no_grad():
 
         z = torch.randn(n_cells, model.latent_dim, device=device)

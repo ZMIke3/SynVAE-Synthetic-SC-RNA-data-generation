@@ -62,8 +62,8 @@ model = SynVae(
     hidden_dims=None, 
     has_cell_labels=True,
     cells_key="cell_type",       # column in adata.obs holding cell type labels
-    cell_embed_dim=16,
-    has_trials_labels=True,
+    cell_embed_dim=16,           # Must set when has_cell_labels is True
+    has_trials_labels=True,      # Must set when has_trials_labels is True
     trials_key=None,          # column in adata.obs holding batch/experiment labels
     trials_embed_dim=8,
 )

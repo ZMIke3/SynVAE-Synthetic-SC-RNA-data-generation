@@ -50,6 +50,12 @@ def plot_latent_space_umap(model, dataloader, label_names=None, n_samples=20000,
 
         for data, label, exp_id in dataloader:
             data = data.to(device)
+            
+            if cell_id is not None:
+                cell_id = cell_id.to(device)
+            if exp_id is not None:
+                exp_id = exp_id.to(device)
+
             _, mu_z, _, _, _ = model(data, cell_ids=label, exp_ids=exp_id, enc_log1p=enc_log1p)
             
             latent.append(mu_z.cpu().numpy())
