@@ -124,3 +124,7 @@ model.save("lib.synvae") # Does not save the dataset object
 
 model = SynVae.load("lib.synvae") # No dataset needed when reloading the library
 ```
+
+
+## References
+ - ScVI: https://pmc.ncbi.nlm.nih.gov/articles/PMC6289068/#S2
