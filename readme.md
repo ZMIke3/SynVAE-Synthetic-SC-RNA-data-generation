@@ -57,11 +57,14 @@ data = preprocessing(data) # drop cells that have < 1 gene
 ```python
 model = SynVae(
     data,
+    n_genes=None,               # Inferred from the data object if not given
+    latent_dim=10, 
+    hidden_dims=None, 
     has_cell_labels=True,
     cells_key="cell_type",       # column in adata.obs holding cell type labels
     cell_embed_dim=16,
     has_trials_labels=True,
-    trials_key="batch",          # column in adata.obs holding batch/experiment labels
+    trials_key=None,          # column in adata.obs holding batch/experiment labels
     trials_embed_dim=8,
 )
 
