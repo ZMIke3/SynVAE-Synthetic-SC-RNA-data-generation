@@ -50,9 +50,9 @@ def plot_latent_space_umap(model, dataloader, label_names=None, n_samples=20000,
 
         for data, label, exp_id in dataloader:
             data = data.to(device)
-            
-            if cell_id is not None:
-                cell_id = cell_id.to(device)
+
+            if label is not None:
+                label = label.to(device)
             if exp_id is not None:
                 exp_id = exp_id.to(device)
 
